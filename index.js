@@ -641,7 +641,6 @@
 // // --- End of Main Application Start Function ---
 
 
-
 require('dotenv').config();
 const express = require('express');
 const { Telegraf, Markup } = require('telegraf');
