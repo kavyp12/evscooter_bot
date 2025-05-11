@@ -1,0 +1,33 @@
+{
+  "name": "ev_cahtbot",
+  "version": "1.0.0",
+  "description": "A Telegram bot for EV scooter information in India",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "ev",
+    "scooter",
+    "india",
+    "chatbot"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.9.0",
+    "dot-env": "^0.0.1",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "mongoose": "^7.8.7",
+    "telegraf": "^4.16.3",
+    "telegraf-session-mongoose": "^2.0.6"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
