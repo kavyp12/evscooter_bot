@@ -648,22 +648,23 @@ const axios = require('axios');
 const mongoose = require('mongoose');
 const { session } = require('telegraf-session-mongoose');
 
-// Initialize Express app
+// Initialize Express app globally
 const app = express();
-app.use(express.json());
+app.use(express.json()); // Global middleware for parsing JSON bodies
 
 // Configure environment variables
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/ev-chatbot';
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID;
-const VERCEL_URL = process.env.VERCEL_URL || `https://${process.env.VERCEL_GIT_REPO_SLUG}.vercel.app`;
+// VERCEL_URL is automatically provided by Vercel in production.
+const VERCEL_URL = process.env.VERCEL_URL || (process.env.VERCEL_GIT_REPO_SLUG ? `https://${process.env.VERCEL_GIT_REPO_SLUG}.vercel.app` : null);
 
 // --- Mongoose Connection Options ---
 const mongooseOptions = {
-    serverSelectionTimeoutMS: 30000,
-    socketTimeoutMS: 45000,
-    family: 4
+    serverSelectionTimeoutMS: 30000, // Keep trying to connect for 30 seconds
+    socketTimeoutMS: 45000,        // Close sockets after 45 seconds of inactivity
+    family: 4                      // Use IPv4, skip trying IPv6
 };
 
 // --- Define Mongoose Schemas and Models ---
@@ -734,33 +735,41 @@ const Conversation = mongoose.model('Conversation', conversationSchema);
 mongoose.connection.on('connected', () => {
     console.log('Mongoose connected to DB.');
 });
-
 mongoose.connection.on('error', (err) => {
     console.error('Mongoose connection error:', err);
 });
-
 mongoose.connection.on('disconnected', () => {
     console.log('Mongoose disconnected from DB.');
 });
-
 mongoose.connection.on('reconnected', () => {
     console.log('Mongoose reconnected to DB.');
 });
-
-process.on('SIGINT', async () => {
+process.on('SIGINT', async () => { // Graceful shutdown for local dev
     console.log('SIGINT received. Closing Mongoose connection...');
-    await mongoose.connection.close();
-    console.log('Mongoose connection closed due to app termination.');
+    if (mongoose.connection.readyState === 1) { // 1 means connected
+        await mongoose.connection.close();
+        console.log('Mongoose connection closed due to app termination.');
+    }
     process.exit(0);
 });
 // --- End of Mongoose Connection Event Listeners ---
 
 // Initialize bot instance
+if (!TELEGRAM_BOT_TOKEN) {
+    console.error("CRITICAL: TELEGRAM_BOT_TOKEN is not defined. Bot cannot start.");
+    // Optionally exit if this is a hard requirement for the module to load,
+    // but Vercel might try to run it anyway. Logging is important.
+}
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 
-// --- Helper Functions ---
+// --- Helper Functions (queryChatGPT, saveConversation, etc.) ---
+// (Your existing helper functions remain here, unchanged)
 async function queryChatGPT(prompt, conversationHistory = []) {
     try {
+        if (!OPENAI_API_KEY) {
+            console.warn("OPENAI_API_KEY is not set. ChatGPT queries will fail.");
+            return "I'm currently unable to process complex requests. Please try asking something simpler or check back later.";
+        }
         const messages = [
             {
                 role: 'system',
@@ -842,7 +851,7 @@ async function saveConversation(ctx, userMessage, botMessage) {
                     }
                 }
             },
-            { upsert: true, new: true }
+            { upsert: true, new: true, setDefaultsOnInsert: true }
         );
     } catch (error) {
         console.error('Error saving conversation to custom collection:', error);
@@ -853,7 +862,7 @@ async function getConversationHistory(userId) {
     try {
         const record = await Conversation.findOne({ userId });
         if (!record || !record.conversations) return [];
-        const recentConversations = record.conversations.slice(-10);
+        const recentConversations = record.conversations.slice(-10); // Get last 10 exchanges
         return recentConversations.map(conv => [
             { role: 'user', content: conv.userMessage },
             { role: 'assistant', content: conv.botMessage }
@@ -874,7 +883,7 @@ async function checkAvailabilityByPincode(pincode) {
         const dealerInfo = [];
         dealers.forEach(dealer => {
             dealer.availableModels.forEach(model => {
-                if (model && model.model) {
+                if (model && model.model) { // Ensure model and model.model exist
                     availableScootersSet.add(model.model);
                 }
             });
@@ -882,7 +891,7 @@ async function checkAvailabilityByPincode(pincode) {
                 name: dealer.name,
                 address: dealer.address,
                 contact: dealer.contact,
-                models: dealer.availableModels.map(m => m && m.model ? m.model : 'N/A').join(', ')
+                models: dealer.availableModels.map(m => m && m.model ? m.model : 'N/A').join(', ') || 'Not specified'
             });
         });
         return {
@@ -896,20 +905,17 @@ async function checkAvailabilityByPincode(pincode) {
         return { available: false, message: 'Oops! Something went wrong while checking for availability. Please try again.' };
     }
 }
-
 async function getScooterInfo(modelName) {
     try {
         const scooter = await Scooter.findOne({ model: { $regex: new RegExp(`^${modelName}$`, 'i') } });
 
         if (!scooter) {
             const similarScooters = await Scooter.find({ model: { $regex: modelName, $options: 'i' } }).limit(1);
-
             if (similarScooters.length === 0) {
                 return { found: false, message: `Sorry, I couldn't find specific information for an EV scooter named "${modelName}". You can ask me to list available models.` };
             }
             const aSimilarScooter = similarScooters[0];
             let suggestionMessage = `I couldn't find an exact match for "${modelName}". Did you perhaps mean "${aSimilarScooter.brand} ${aSimilarScooter.model}"? \n\nIf so, here's some information:\n\n`;
-
             let responseText = `*${aSimilarScooter.brand} ${aSimilarScooter.model}*\n\n`;
             responseText += `*Price (Ex-showroom):* ₹${aSimilarScooter.price.base.toLocaleString('en-IN')}\n`;
             responseText += `*Price (On-Road, approx.):* ₹${aSimilarScooter.price.onRoad.toLocaleString('en-IN')}\n`;
@@ -917,23 +923,14 @@ async function getScooterInfo(modelName) {
             responseText += `*Battery Capacity:* ${aSimilarScooter.batteryCapacity} kWh\n`;
             responseText += `*Charging Time:* ${aSimilarScooter.chargingTime} hours\n`;
             responseText += `*Top Speed:* ${aSimilarScooter.topSpeed} km/h\n`;
-            if (aSimilarScooter.colors && aSimilarScooter.colors.length > 0) {
-                responseText += `*Available Colors:* ${aSimilarScooter.colors.join(', ')}\n`;
-            }
+            if (aSimilarScooter.colors && aSimilarScooter.colors.length > 0) responseText += `*Available Colors:* ${aSimilarScooter.colors.join(', ')}\n`;
             if (aSimilarScooter.features && aSimilarScooter.features.length > 0) {
                 responseText += `\n*Key Features:*\n`;
                 aSimilarScooter.features.forEach(feature => { responseText += `- ${feature}\n`; });
             }
-            if (aSimilarScooter.description) {
-                responseText += `\n*Description:* ${aSimilarScooter.description}\n`;
-            }
+            if (aSimilarScooter.description) responseText += `\n*Description:* ${aSimilarScooter.description}\n`;
             responseText += `\nWould you like to check its availability? Just send your 6-digit pincode.`;
-
-            return {
-                found: true,
-                message: suggestionMessage + responseText,
-                scooter: aSimilarScooter
-            };
+            return { found: true, message: suggestionMessage + responseText, scooter: aSimilarScooter };
         }
 
         let responseText = `*${scooter.brand} ${scooter.model}*\n\n`;
@@ -943,23 +940,14 @@ async function getScooterInfo(modelName) {
         responseText += `*Battery Capacity:* ${scooter.batteryCapacity} kWh\n`;
         responseText += `*Charging Time:* ${scooter.chargingTime} hours\n`;
         responseText += `*Top Speed:* ${scooter.topSpeed} km/h\n`;
-        if (scooter.colors && scooter.colors.length > 0) {
-            responseText += `*Available Colors:* ${scooter.colors.join(', ')}\n`;
-        }
+        if (scooter.colors && scooter.colors.length > 0) responseText += `*Available Colors:* ${scooter.colors.join(', ')}\n`;
         if (scooter.features && scooter.features.length > 0) {
             responseText += `\n*Key Features:*\n`;
             scooter.features.forEach(feature => { responseText += `- ${feature}\n`; });
         }
-        if (scooter.description) {
-            responseText += `\n*Description:* ${scooter.description}\n`;
-        }
+        if (scooter.description) responseText += `\n*Description:* ${scooter.description}\n`;
         responseText += `\nWould you like to check its availability? Just send your 6-digit pincode.`;
-
-        return {
-            found: true,
-            message: responseText,
-            scooter: scooter
-        };
+        return { found: true, message: responseText, scooter: scooter };
     } catch (error) {
         console.error('Error fetching scooter info:', error);
         return { found: false, message: 'An error occurred while fetching scooter details. Please try again.' };
@@ -973,15 +961,9 @@ async function getComparisonInfo(modelName1, modelName2) {
             getScooterInfo(modelName2)
         ]);
 
-        if (!scooter1Result.found && !scooter2Result.found) {
-            return `I couldn't find information for either "${modelName1}" or "${modelName2}". Please check the spellings or try different models.`;
-        }
-        if (!scooter1Result.found) {
-            return `I couldn't find information for "${modelName1}". I can tell you about "${modelName2}" if you'd like, or you can try checking the spelling for the first model.`;
-        }
-        if (!scooter2Result.found) {
-            return `I couldn't find information for "${modelName2}". I can tell you about "${modelName1}" if you'd like, or you can try checking the spelling for the second model.`;
-        }
+        if (!scooter1Result.found && !scooter2Result.found) return `I couldn't find information for either "${modelName1}" or "${modelName2}". Please check the spellings or try different models.`;
+        if (!scooter1Result.found) return `I couldn't find information for "${modelName1}". I can tell you about "${modelName2}" if you'd like, or you can try checking the spelling for the first model.`;
+        if (!scooter2Result.found) return `I couldn't find information for "${modelName2}". I can tell you about "${modelName1}" if you'd like, or you can try checking the spelling for the second model.`;
 
         const s1 = scooter1Result.scooter;
         const s2 = scooter2Result.scooter;
@@ -996,7 +978,6 @@ async function getComparisonInfo(modelName1, modelName2) {
         comparisonText += `| Battery Capacity       | ${`${s1.batteryCapacity} kWh`.padEnd(20)} | ${`${s2.batteryCapacity} kWh`.padEnd(20)} |\n`;
         comparisonText += `| Charging Time          | ${`${s1.chargingTime} hrs`.padEnd(20)} | ${`${s2.chargingTime} hrs`.padEnd(20)} |\n`;
         comparisonText += `| Top Speed              | ${`${s1.topSpeed} km/h`.padEnd(20)} | ${`${s2.topSpeed} km/h`.padEnd(20)} |\n`;
-
         comparisonText += `\n*Features for ${s1.model}:*\n- ${s1.features.join('\n- ') || 'Not listed'}\n`;
         comparisonText += `\n*Features for ${s2.model}:*\n- ${s2.features.join('\n- ') || 'Not listed'}\n`;
         comparisonText += `\nWould you like to check availability for either of these in your area? Send your 6-digit pincode.`;
@@ -1015,26 +996,26 @@ function extractPincode(message) {
 
 async function extractPotentialModels(message) {
     try {
-        const allScooters = await Scooter.find({}, 'model brand').lean();
+        const allScooters = await Scooter.find({}, 'model brand').lean(); // .lean() for performance
         const models = [];
         const lowerMessage = message.toLowerCase();
-
         for (const scooter of allScooters) {
             if (lowerMessage.includes(scooter.model.toLowerCase()) ||
                 (scooter.brand && lowerMessage.includes(scooter.brand.toLowerCase() + " " + scooter.model.toLowerCase()))) {
                 models.push(scooter.model);
             }
         }
-        return [...new Set(models)];
+        return [...new Set(models)]; // Return unique models
     } catch (dbError) {
         console.error("DB Error in extractPotentialModels:", dbError);
         return [];
     }
 }
-
 // --- End of Helper Functions ---
 
 // --- Bot Commands and Handlers ---
+// (Your existing bot handlers: bot.start, bot.help, bot.command('getinteractions'), bot.on('text'))
+// Ensure they use try-catch for error handling and call saveConversation appropriately.
 bot.start(async (ctx) => {
     const welcomeMessage = `Namaste! 🙏 Welcome to EV India Bot! 🇮🇳
 
@@ -1051,11 +1032,11 @@ How can I assist you today?`;
         await ctx.reply(welcomeMessage, Markup.keyboard([
             ['Compare Scooters', 'Find Scooters by Pincode'],
             ['/help']
-        ]).resize().oneTime());
+        ]).resize().oneTime()); // oneTime() might not be ideal if users want to reuse it
         await saveConversation(ctx, '/start', welcomeMessage);
     } catch (e) {
         console.error("Error in /start handler:", e);
-        await ctx.reply("Sorry, there was an issue starting our conversation. Please try again.");
+        await ctx.reply("Sorry, there was an issue starting our conversation. Please try again.").catch(err => console.error("Failed to send error reply in /start:", err));
     }
 });
 
@@ -1089,7 +1070,7 @@ Just type your question! If I can't find specific data, I'll try to answer with 
         await saveConversation(ctx, '/help', helpMessage);
     } catch (e) {
         console.error("Error in /help handler:", e);
-        await ctx.reply("Sorry, couldn't fetch help information right now.");
+        await ctx.reply("Sorry, couldn't fetch help information right now.").catch(err => console.error("Failed to send error reply in /help:", err));
     }
 });
 
@@ -1100,21 +1081,19 @@ bot.command('getinteractions', async (ctx) => {
             await ctx.reply("Sorry, this command is restricted to administrators.");
             return;
         }
-
         const record = await Conversation.findOne({ userId });
         if (!record || !record.conversations || record.conversations.length === 0) {
-            await ctx.reply("No interaction history found for you.");
-            return;
+            await ctx.reply("No interaction history found for you."); return;
         }
-
         const recentInteractions = record.conversations.slice(-10);
         let responseText = `*Your Recent Interactions (Last ${recentInteractions.length}):*\n\n`;
-        responseText += `**User Details:**\n`;
-        responseText += `- ID: ${record.userDetails.id}\n`;
-        responseText += `- Name: ${record.userDetails.first_name || 'N/A'}\n`;
-        responseText += `- Is Bot: ${record.userDetails.is_bot ? 'Yes' : 'No'}\n`;
-        responseText += `- Language: ${record.userDetails.language_code || 'N/A'}\n\n`;
-
+        if (record.userDetails) {
+            responseText += `**User Details:**\n`;
+            responseText += `- ID: ${record.userDetails.id}\n`;
+            responseText += `- Name: ${record.userDetails.first_name || 'N/A'}\n`;
+            responseText += `- Is Bot: ${record.userDetails.is_bot ? 'Yes' : 'No'}\n`;
+            responseText += `- Language: ${record.userDetails.language_code || 'N/A'}\n\n`;
+        }
         recentInteractions.forEach((interaction, index) => {
             responseText += `**Interaction ${index + 1}:**\n`;
             responseText += `- Update ID: ${interaction.update_id || 'N/A'}\n`;
@@ -1125,12 +1104,11 @@ bot.command('getinteractions', async (ctx) => {
             responseText += `- User Message: ${interaction.userMessage}\n`;
             responseText += `- Bot Response: ${interaction.botMessage}\n\n`;
         });
-
         await ctx.replyWithMarkdown(responseText);
-        await saveConversation(ctx, '/getinteractions', responseText);
+        await saveConversation(ctx, '/getinteractions', "Displayed interaction history.");
     } catch (error) {
         console.error('Error fetching interactions:', error);
-        await ctx.reply("Sorry, I encountered an error while fetching your interaction history.");
+        await ctx.reply("Sorry, I encountered an error while fetching your interaction history.").catch(err => console.error("Failed to send error reply in /getinteractions:", err));
     }
 });
 
@@ -1148,8 +1126,9 @@ bot.on('text', async (ctx) => {
 
         if (pincode) {
             const availabilityResult = await checkAvailabilityByPincode(pincode);
-            if (availabilityResult.available) {
-                botResponse = `${availabilityResult.message}\n\n*Dealer(s) Found:*\n`;
+            botResponse = availabilityResult.message; // Initial response
+            if (availabilityResult.available && availabilityResult.dealers) {
+                botResponse += `\n\n*Dealer(s) Found:*\n`;
                 availabilityResult.dealers.forEach((dealer, index) => {
                     botResponse += `\n*${index + 1}. ${dealer.name}*\n`;
                     botResponse += `   Address: ${dealer.address}\n`;
@@ -1157,8 +1136,6 @@ bot.on('text', async (ctx) => {
                     botResponse += `   Models (reported): ${dealer.models || 'N/A'}\n`;
                 });
                 botResponse += "\n\nWould you like specific information about any of these scooters or brands?";
-            } else {
-                botResponse = availabilityResult.message;
             }
         } else if (comparisonMatch) {
             const model1 = comparisonMatch[1].trim();
@@ -1169,10 +1146,7 @@ bot.on('text', async (ctx) => {
             if (potentialModels.length === 1) {
                 const scooterInfo = await getScooterInfo(potentialModels[0]);
                 botResponse = scooterInfo.message;
-            } else if (potentialModels.length > 1) {
-                const conversationHistory = await getConversationHistory(userId);
-                botResponse = await queryChatGPT(userMessage, conversationHistory);
-            } else {
+            } else { // Includes potentialModels.length > 1 and potentialModels.length === 0 (general query)
                 const conversationHistory = await getConversationHistory(userId);
                 botResponse = await queryChatGPT(userMessage, conversationHistory);
             }
@@ -1181,11 +1155,11 @@ bot.on('text', async (ctx) => {
         await saveConversation(ctx, userMessage, botResponse);
     } catch (error) {
         console.error(`Error processing text message: "${userMessage}" from user ${userId}:`, error);
+        let errorReply = "I'm sorry, I ran into a little trouble processing that. Could you try rephrasing or ask something else?";
         if (error.name === 'MongooseError' && error.message.includes('buffering timed out')) {
-            await ctx.reply("I'm having trouble connecting to my database right now. Please try again in a few moments.");
-        } else {
-            await ctx.reply("I'm sorry, I ran into a little trouble processing that. Could you try rephrasing or ask something else?");
+            errorReply = "I'm having trouble connecting to my database right now. Please try again in a few moments.";
         }
+        await ctx.reply(errorReply).catch(err => console.error("Failed to send error reply in text handler:", err));
         await saveConversation(ctx, userMessage, "Error response: Bot encountered an internal error.");
     }
 });
@@ -1196,86 +1170,149 @@ async function seedSampleData() {
     try {
         const scootersCount = await Scooter.countDocuments();
         if (scootersCount > 0) {
-            console.log('Sample scooter data likely already exists, skipping seed.');
+            console.log('Sample scooter data likely already exists, skipping scooter seed.');
             const dealersCount = await Dealer.countDocuments();
-            if (dealersCount === 0) {
-                console.log('Scooters exist, but dealers are missing. Seeding dealers...');
-            } else {
+            if (dealersCount > 0) {
+                console.log('Sample dealer data also exists, skipping all seeding.');
                 return;
+            }
+            console.log('Scooters exist, but dealers are missing. Seeding dealers...');
+        } else {
+            console.log('No scooters found. Seeding sample scooter and dealer data...');
+            await Scooter.deleteMany({}); // Clear existing scooters if we are seeding them
+            await Dealer.deleteMany({});  // Clear existing dealers
+        }
+
+
+        if (scootersCount === 0) { // Only seed scooters if none exist
+            const scootersData = [
+                { model: 'S1 Pro', brand: 'Ola Electric', price: { base: 129999, onRoad: 145000 }, range: 181, chargingTime: 6.5, topSpeed: 116, batteryCapacity: 4, features: ['Digital Console', 'Reverse Mode', 'Fast Charging', 'Bluetooth', 'GPS', 'Anti-theft alarm', 'Hill Hold'], colors: ['Jet Black', 'Porcelain White', 'Neo Mint', 'Coral Glam', 'Liquid Silver'], imageUrl: 'https://example.com/ola_s1_pro.jpg', description: 'The Ola S1 Pro is a flagship electric scooter known for its performance, range, and smart features.' },
+                { model: '450X', brand: 'Ather', price: { base: 138000, onRoad: 160000 }, range: 111, chargingTime: 5.7, topSpeed: 90, batteryCapacity: 3.7, features: ['Touchscreen Dashboard', 'OTA Updates', 'Navigation', 'Riding Modes', 'Reverse Assist', 'Auto Indicator Off'], colors: ['Space Grey', 'Mint Green', 'True Red', 'Cosmic Black'], imageUrl: 'https://example.com/ather_450x.jpg', description: 'The Ather 450X is a premium smart electric scooter offering a thrilling ride and connected features. Range is certified, real-world may vary.' },
+                { model: 'iQube S', brand: 'TVS', price: { base: 120000, onRoad: 135000 }, range: 100, chargingTime: 4.5, topSpeed: 78, batteryCapacity: 3.04, features: ['SmartXonnect', 'Geo-fencing', 'Anti-theft Alert', 'Q-Park Assist', 'USB Charging'], colors: ['Titanium Grey Matte', 'Starlight Blue Glossy', 'Mint Blue'], imageUrl: 'https://example.com/tvs_iqube_s.jpg', description: 'The TVS iQube S is a reliable electric scooter with practical features for urban commuting.' },
+                { model: 'Chetak Premium', brand: 'Bajaj', price: { base: 145000, onRoad: 158000 }, range: 90, chargingTime: 5, topSpeed: 63, batteryCapacity: 2.88, features: ['Metal Body', 'Keyless Start', 'IP67 Rating', 'Sequential Blinkers', 'Digital Console'], colors: ['Hazelnut', 'Brooklyn Black', 'Velluto Rosso', 'Indigo Metallic'], imageUrl: 'https://example.com/bajaj_chetak_premium.jpg', description: 'The Bajaj Chetak electric revives a classic name with modern electric technology and premium build quality.' },
+                { model: 'Vida V1 Pro', brand: 'Hero', price: { base: 125000, onRoad: 140000 }, range: 110, chargingTime: 5.9, topSpeed: 80, batteryCapacity: 3.94, features: ['Removable Batteries', 'Cruise Control', 'SOS Alert', 'Follow-me-home lights', 'Two-way throttle'], colors: ['Matte White', 'Matte Sports Red', 'Matte Abrax Orange'], imageUrl: 'https://example.com/vida_v1_pro.jpg', description: 'The Hero Vida V1 Pro offers innovative features like removable batteries and a customizable riding experience.' }
+            ];
+            await Scooter.insertMany(scootersData);
+            console.log('Sample scooter data seeded successfully.');
+        }
+
+        // Seed dealers, ensuring they link to existing scooters
+        const dealersCount = await Dealer.countDocuments();
+        if (dealersCount === 0) {
+            const scooterDocs = await Scooter.find({}); // Fetch all scooters
+            const scooterMap = {};
+            scooterDocs.forEach(scooter => { scooterMap[scooter.model] = scooter._id; });
+
+            // Ensure scooterMap has the IDs before trying to use them
+            if (Object.keys(scooterMap).length > 0) {
+                 const dealersData = [
+                    { name: 'Ola Experience Centre - Mumbai', address: '123 Andheri West', pincode: '400058', city: 'Mumbai', state: 'Maharashtra', contact: '+91 9000000001', email: 'mumbai.ec@olaelectric.com', availableModels: scooterMap['S1 Pro'] ? [scooterMap['S1 Pro']] : [], operatingHours: '10:00 AM - 8:00 PM', coordinates: { latitude: 19.1196, longitude: 72.8465 } },
+                    { name: 'Ather Space - Delhi', address: '456 Connaught Place', pincode: '110001', city: 'New Delhi', state: 'Delhi', contact: '+91 9000000002', email: 'delhi.as@atherenergy.com', availableModels: scooterMap['450X'] ? [scooterMap['450X']] : [], operatingHours: '10:00 AM - 7:00 PM', coordinates: { latitude: 28.6329, longitude: 77.2195 } },
+                    { name: 'TVS Green Motors - Bangalore', address: '789 Koramangala', pincode: '560034', city: 'Bangalore', state: 'Karnataka', contact: '+91 9000000003', email: 'bangalore.tvs@greenmotors.com', availableModels: scooterMap['iQube S'] ? [scooterMap['iQube S']] : [], operatingHours: '9:30 AM - 7:30 PM', coordinates: { latitude: 12.9351, longitude: 77.6245 } },
+                    { name: 'Bajaj EV World - Pune', address: 'Plot 10, FC Road', pincode: '411004', city: 'Pune', state: 'Maharashtra', contact: '+91 9000000004', email: 'pune.bajaj@evworld.com', availableModels: scooterMap['Chetak Premium'] ? [scooterMap['Chetak Premium']] : [], operatingHours: '10:00 AM - 8:00 PM', coordinates: { latitude: 18.5204, longitude: 73.8567 } },
+                    { name: 'Hero Vida Hub - South Mumbai', address: '234 Marine Drive', pincode: '400002', city: 'Mumbai', state: 'Maharashtra', contact: '+91 9000000005', email: 'mumbai.vida@heromotocorp.com', availableModels: [scooterMap['Vida V1 Pro'], scooterMap['S1 Pro']].filter(id => id), operatingHours: '11:00 AM - 7:00 PM', coordinates: { latitude: 18.9442, longitude: 72.8237 } }
+                ];
+                await Dealer.insertMany(dealersData);
+                console.log('Sample dealer data seeded successfully.');
+            } else {
+                console.log('Cannot seed dealers as no scooter data found to link.');
             }
         }
 
-        console.log('Seeding sample data...');
-        await Scooter.deleteMany({});
-        await Dealer.deleteMany({});
-
-        const scootersData = [
-            { model: 'S1 Pro', brand: 'Ola Electric', price: { base: 129999, onRoad: 145000 }, range: 181, chargingTime: 6.5, topSpeed: 116, batteryCapacity: 4, features: ['Digital Console', 'Reverse Mode', 'Fast Charging', 'Bluetooth', 'GPS', 'Anti-theft alarm', 'Hill Hold'], colors: ['Jet Black', 'Porcelain White', 'Neo Mint', 'Coral Glam', 'Liquid Silver'], imageUrl: 'https://example.com/ola_s1_pro.jpg', description: 'The Ola S1 Pro is a flagship electric scooter known for its performance, range, and smart features.' },
-            { model: '450X', brand: 'Ather', price: { base: 138000, onRoad: 160000 }, range: 111, chargingTime: 5.7, topSpeed: 90, batteryCapacity: 3.7, features: ['Touchscreen Dashboard', 'OTA Updates', 'Navigation', 'Riding Modes', 'Reverse Assist', 'Auto Indicator Off'], colors: ['Space Grey', 'Mint Green', 'True Red', 'Cosmic Black'], imageUrl: 'https://example.com/ather_450x.jpg', description: 'The Ather 450X is a premium smart electric scooter offering a thrilling ride and connected features. Range is certified, real-world may vary.' },
-            { model: 'iQube S', brand: 'TVS', price: { base: 120000, onRoad: 135000 }, range: 100, chargingTime: 4.5, topSpeed: 78, batteryCapacity: 3.04, features: ['SmartXonnect', 'Geo-fencing', 'Anti-theft Alert', 'Q-Park Assist', 'USB Charging'], colors: ['Titanium Grey Matte', 'Starlight Blue Glossy', 'Mint Blue'], imageUrl: 'https://example.com/tvs_iqube_s.jpg', description: 'The TVS iQube S is a reliable electric scooter with practical features for urban commuting.' },
-            { model: 'Chetak Premium', brand: 'Bajaj', price: { base: 145000, onRoad: 158000 }, range: 90, chargingTime: 5, topSpeed: 63, batteryCapacity: 2.88, features: ['Metal Body', 'Keyless Start', 'IP67 Rating', 'Sequential Blinkers', 'Digital Console'], colors: ['Hazelnut', 'Brooklyn Black', 'Velluto Rosso', 'Indigo Metallic'], imageUrl: 'https://example.com/bajaj_chetak_premium.jpg', description: 'The Bajaj Chetak electric revives a classic name with modern electric technology and premium build quality.' },
-            { model: 'Vida V1 Pro', brand: 'Hero', price: { base: 125000, onRoad: 140000 }, range: 110, chargingTime: 5.9, topSpeed: 80, batteryCapacity: 3.94, features: ['Removable Batteries', 'Cruise Control', 'SOS Alert', 'Follow-me-home lights', 'Two-way throttle'], colors: ['Matte White', 'Matte Sports Red', 'Matte Abrax Orange'], imageUrl: 'https://example.com/vida_v1_pro.jpg', description: 'The Hero Vida V1 Pro offers innovative features like removable batteries and a customizable riding experience.' }
-        ];
-
-        const scooterDocs = await Scooter.insertMany(scootersData);
-        const scooterMap = {};
-        scooterDocs.forEach(scooter => { scooterMap[scooter.model] = scooter._id; });
-
-        const dealersData = [
-            { name: 'Ola Experience Centre - Mumbai', address: '123 Andheri West', pincode: '400058', city: 'Mumbai', state: 'Maharashtra', contact: '+91 9000000001', email: 'mumbai.ec@olaelectric.com', availableModels: [scooterMap['S1 Pro']], operatingHours: '10:00 AM - 8:00 PM', coordinates: { latitude: 19.1196, longitude: 72.8465 } },
-            { name: 'Ather Space - Delhi', address: '456 Connaught Place', pincode: '110001', city: 'New Delhi', state: 'Delhi', contact: '+91 9000000002', email: 'delhi.as@atherenergy.com', availableModels: [scooterMap['450X']], operatingHours: '10:00 AM - 7:00 PM', coordinates: { latitude: 28.6329, longitude: 77.2195 } },
-            { name: 'TVS Green Motors - Bangalore', address: '789 Koramangala', pincode: '560034', city: 'Bangalore', state: 'Karnataka', contact: '+91 9000000003', email: 'bangalore.tvs@greenmotors.com', availableModels: [scooterMap['iQube S']], operatingHours: '9:30 AM - 7:30 PM', coordinates: { latitude: 12.9351, longitude: 77.6245 } },
-            { name: 'Bajaj EV World - Pune', address: 'Plot 10, FC Road', pincode: '411004', city: 'Pune', state: 'Maharashtra', contact: '+91 9000000004', email: 'pune.bajaj@evworld.com', availableModels: [scooterMap['Chetak Premium']], operatingHours: '10:00 AM - 8:00 PM', coordinates: { latitude: 18.5204, longitude: 73.8567 } },
-            { name: 'Hero Vida Hub - South Mumbai', address: '234 Marine Drive', pincode: '400002', city: 'Mumbai', state: 'Maharashtra', contact: '+91 9000000005', email: 'mumbai.vida@heromotocorp.com', availableModels: [scooterMap['Vida V1 Pro'], scooterMap['S1 Pro']], operatingHours: '11:00 AM - 7:00 PM', coordinates: { latitude: 18.9442, longitude: 72.8237 } }
-        ];
-        await Dealer.insertMany(dealersData);
-        console.log('Sample scooter and dealer data seeded successfully');
     } catch (error) {
         console.error('Error seeding data:', error);
     }
 }
 // --- End of Sample Data Seeding ---
 
-// --- Main Application Start Function ---
-async function main() {
+
+// --- Main Application Initialization Function ---
+async function initializeApplication() {
     try {
         console.log('Attempting to connect to MongoDB...');
+        if (!MONGODB_URI) {
+            throw new Error("MONGODB_URI is not defined. Cannot connect to the database.");
+        }
         await mongoose.connect(MONGODB_URI, mongooseOptions);
+        // Mongoose 'connected' event listener will log success.
 
+        if (!TELEGRAM_BOT_TOKEN) { // Re-check, as Telegraf might not throw immediately
+            throw new Error("TELEGRAM_BOT_TOKEN is not defined. Bot cannot be initialized.");
+        }
         bot.use(session({
-            store: {
-                collection: mongoose.connection.collection('sessions'),
-            },
+            store: { collection: mongoose.connection.collection('sessions') },
+            // cookie: { maxAge: 86400000 } // Example: 1 day session
         }));
         console.log('Mongoose session middleware initialized successfully.');
 
-        await seedSampleData();
+        // Seed data (idempotent or runs once)
+        if (process.env.NODE_ENV !== 'test') { // Avoid seeding in test environments
+            await seedSampleData();
+        }
 
-        // Set up webhook
-        const webhookPath = `/bot${TELEGRAM_BOT_TOKEN}`;
-        const webhookUrl = `${VERCEL_URL}${webhookPath}`;
-        await bot.telegram.setWebhook(webhookUrl);
-        console.log(`Webhook set to ${webhookUrl}`);
+        // Webhook setup
+        const webhookPath = `/api/telegram-webhook`; // Consistent and clear path
 
-        // Handle webhook requests
+        if (process.env.NODE_ENV === 'production' && VERCEL_URL) {
+            const webhookUrl = `${VERCEL_URL.replace(/\/$/, '')}${webhookPath}`; // Ensure no double slashes
+            try {
+                const currentWebhook = await bot.telegram.getWebhookInfo();
+                if (currentWebhook.url !== webhookUrl) {
+                    await bot.telegram.setWebhook(webhookUrl);
+                    console.log(`Webhook set to ${webhookUrl}`);
+                } else {
+                    console.log(`Webhook already set to ${webhookUrl}.`);
+                }
+            } catch (e) {
+                console.error(`Failed to set webhook: ${e.message}. Ensure TELEGRAM_BOT_TOKEN is correct and bot has permissions.`);
+                // This might not be a fatal error for app start, but bot won't receive updates via webhook.
+            }
+        } else {
+            console.log('Webhook setup skipped (not in production or VERCEL_URL not set).');
+            if (process.env.NODE_ENV === 'production' && !VERCEL_URL) {
+                console.warn("VERCEL_URL environment variable is not set. Webhook cannot be configured automatically on Vercel.");
+            }
+        }
+
+        // Use Telegraf's webhook callback middleware.
+        // This will handle POST requests from Telegram to the webhookPath.
         app.use(bot.webhookCallback(webhookPath));
 
-        // Health check endpoint
-        app.get('/', (req, res) => {
-            res.send('EV India Bot server is running and DB connected!');
+        // Health check endpoint (good for Vercel and other platforms)
+        app.get('/api/health', (req, res) => {
+            res.status(200).send('EV India Bot server is running healthy!');
         });
 
-        // Vercel serverless function export
-        module.exports = app;
+        // Optional: A root path handler
+        app.get('/', (req, res) => {
+            res.send('Welcome to the EV India Bot server. The bot is active on Telegram.');
+        });
+
+        console.log('Application initialization and route setup complete.');
 
     } catch (error) {
-        console.error('Critical Error during application startup:', error);
-        if (error.name === 'MongooseServerSelectionError' || (error.message && error.message.includes('buffering timed out'))) {
-            console.error('Could not connect to MongoDB. Please ensure MongoDB is running and accessible.');
-        }
-        process.exit(1);
+        console.error('CRITICAL ERROR during application startup:', error.message);
+        // Log the full error for more details if available
+        if (error.stack) console.error(error.stack);
+        
+        // In a serverless environment, if critical setup fails,
+        // the function might still be invoked but could be unhealthy.
+        // Re-throwing ensures the promise is rejected.
+        throw error;
     }
 }
 
-main();
-// --- End of Main Application Start Function ---
+// Call the initialization function.
+// This returns a promise. We don't necessarily need to await it here for the export,
+// as Node.js event loop handles async operations.
+// However, catching errors from initialization is crucial.
+initializeApplication().catch(err => {
+    console.error("FATAL: Application failed to initialize properly.", err.message);
+    // Depending on the Vercel setup, this might cause the deployment to be marked as failed
+    // or the function to consistently error out.
+});
+
+// Export the Express app instance for Vercel
+// This is what Vercel's @vercel/node runtime will use.
+// It must be at the top-level of the module.
+module.exports = app;
