@@ -639,6 +639,8 @@
 
 // main();
 // // --- End of Main Application Start Function ---
+
+
 require('dotenv').config();
 const express = require('express');
 const { Telegraf, Markup } = require('telegraf');
@@ -680,7 +682,6 @@ app.get('/api/health', (req, res) => {
         timestamp: new Date().toISOString(),
         databaseStatus: dbStatus,
         botTokenSet: !!process.env.TELEGRAM_BOT_TOKEN, // Check if token is set
-        openaiKeySet: !!process.env.OPENAI_API_KEY, // Check if OpenAI key is set
         vercelUrl: process.env.VERCEL_URL || "Not set (likely local)"
     });
 });
@@ -691,7 +692,7 @@ console.log("GET /api/health route defined.");
 // Configure environment variables
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const MONGODB_URI = process.env.MONGODB_URI; // Removed default to ensure it's always from env
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/ev-chatbot';
 const ADMIN_USER_ID = process.env.ADMIN_USER_ID;
 const VERCEL_URL = process.env.VERCEL_URL || (process.env.VERCEL_GIT_REPO_SLUG ? `https://${process.env.VERCEL_GIT_REPO_SLUG}.vercel.app` : null);
 
@@ -699,21 +700,16 @@ console.log(`VERCEL_URL: ${VERCEL_URL}`);
 if (!TELEGRAM_BOT_TOKEN) {
     console.error("CRITICAL_ENV_VAR_MISSING: TELEGRAM_BOT_TOKEN is not defined in environment variables.");
 }
-if (!MONGODB_URI || !MONGODB_URI.startsWith('mongodb')) { // Check MONGODB_URI more robustly
-    console.error("CRITICAL_ENV_VAR_MISSING: MONGODB_URI is not defined or invalid in environment variables. It must start with 'mongodb'.");
-}
-if (!OPENAI_API_KEY) {
-    console.warn("ENV_VAR_MISSING: OPENAI_API_KEY is not defined. ChatGPT features will be disabled.");
+if (!MONGODB_URI || !MONGODB_URI.startsWith('mongodb')) {
+    console.error("CRITICAL_ENV_VAR_MISSING: MONGODB_URI is not defined or invalid in environment variables.");
 }
 
 
 // --- Mongoose Connection Options ---
 const mongooseOptions = {
-    serverSelectionTimeoutMS: 30000, // Increased slightly for potentially slower Vercel cold starts
+    serverSelectionTimeoutMS: 30000,
     socketTimeoutMS: 45000,
-    family: 4, // Use IPv4, skip trying IPv6
-    // ssl: true, // Generally default for Atlas SRV, but can be explicit if needed
-    // tlsAllowInvalidCertificates: false, // Default is false, ensure it is for security
+    family: 4 // Use IPv4, skip trying IPv6
 };
 
 // --- Define Mongoose Schemas and Models ---
@@ -749,7 +745,7 @@ console.log("Mongoose schemas and models defined.");
 
 // --- Mongoose Connection Event Listeners ---
 mongoose.connection.on('connected', () => console.log('Mongoose connected to DB.'));
-mongoose.connection.on('error', (err) => console.error('Mongoose connection error:', err)); // This will log detailed errors
+mongoose.connection.on('error', (err) => console.error('Mongoose connection error:', err));
 mongoose.connection.on('disconnected', () => console.log('Mongoose disconnected from DB.'));
 mongoose.connection.on('reconnected', () => console.log('Mongoose reconnected to DB.'));
 // --- End of Mongoose Connection Event Listeners ---
@@ -759,11 +755,11 @@ let bot;
 
 // --- Helper Functions ---
 async function queryChatGPT(prompt, conversationHistory = []) {
-    if (!OPENAI_API_KEY) {
-        console.warn("OPENAI_API_KEY is not set. ChatGPT queries will fail.");
-        return "I'm currently unable to process complex requests as my AI core is not configured. Please try asking something simpler or check back later.";
-    }
     try {
+        if (!OPENAI_API_KEY) {
+            console.warn("OPENAI_API_KEY is not set. ChatGPT queries will fail.");
+            return "I'm currently unable to process complex requests. Please try asking something simpler or check back later.";
+        }
         const messages = [
             {
                 role: 'system',
@@ -781,7 +777,7 @@ async function queryChatGPT(prompt, conversationHistory = []) {
         const response = await axios.post(
             'https://api.openai.com/v1/chat/completions',
             {
-                model: 'gpt-4', // Consider 'gpt-3.5-turbo' for faster/cheaper responses if sufficient
+                model: 'gpt-4',
                 messages: messages,
                 temperature: 0.7,
                 max_tokens: 500
@@ -796,13 +792,13 @@ async function queryChatGPT(prompt, conversationHistory = []) {
         return response.data.choices[0].message.content.trim();
     } catch (error) {
         console.error('Error querying ChatGPT:', error.response?.data || error.message);
-        return 'Sorry, I encountered a problem trying to connect to my AI brain. Could you please rephrase or try again later?';
+        return 'Sorry, I encountered a problem trying to understand that. Could you please rephrase or try again later?';
     }
 }
 
 async function saveConversation(ctx, userMessage, botMessage) {
-    if (!ctx.from || !ctx.from.id || !ctx.message || !ctx.chat) { // Added check for ctx.chat
-        console.error('Cannot save conversation: Missing ctx.from.id, ctx.message, or ctx.chat details.');
+    if (!ctx.from || !ctx.from.id || !ctx.message) {
+        console.error('Cannot save conversation: Missing ctx.from.id or ctx.message details.');
         return;
     }
 
@@ -835,16 +831,13 @@ async function saveConversation(ctx, userMessage, botMessage) {
                 },
                 $push: {
                     conversations: {
-                        $each: [{ // Ensure it's an array for $each
-                            update_id: updateId,
-                            message_id: messageId,
-                            chat: chatDetails,
-                            date: date,
-                            userMessage: userMessage,
-                            botMessage: botMessage,
-                            timestamp: new Date()
-                        }],
-                        $slice: -20 // Keep only the last 20 conversation turns
+                        update_id: updateId,
+                        message_id: messageId,
+                        chat: chatDetails,
+                        date: date,
+                        userMessage: userMessage,
+                        botMessage: botMessage,
+                        timestamp: new Date()
                     }
                 }
             },
@@ -859,8 +852,7 @@ async function getConversationHistory(userId) {
     try {
         const record = await Conversation.findOne({ userId });
         if (!record || !record.conversations) return [];
-        // Already sliced to -20 on save, so -10 here gets recent history for prompt
-        const recentConversations = record.conversations.slice(-10);
+        const recentConversations = record.conversations.slice(-10); // Get last 10 exchanges
         return recentConversations.map(conv => [
             { role: 'user', content: conv.userMessage },
             { role: 'assistant', content: conv.botMessage }
@@ -881,7 +873,7 @@ async function checkAvailabilityByPincode(pincode) {
         const dealerInfo = [];
         dealers.forEach(dealer => {
             dealer.availableModels.forEach(model => {
-                if (model && model.model) { // Ensure model is populated and has a model name
+                if (model && model.model) {
                     availableScootersSet.add(`${model.brand} ${model.model}`);
                 }
             });
@@ -892,14 +884,6 @@ async function checkAvailabilityByPincode(pincode) {
                 models: dealer.availableModels.map(m => m && m.model ? `${m.brand} ${m.model}` : 'N/A').join(', ') || 'Not specified'
             });
         });
-        if (availableScootersSet.size === 0 && dealerInfo.length > 0) {
-             return {
-                available: true, // Dealers exist, but models might not be specified for them
-                scooters: [],
-                dealers: dealerInfo,
-                message: `We found ${dealers.length} dealer(s) in pincode ${pincode}, but specific EV models were not listed for them. You may contact them directly:`
-            };
-        }
         return {
             available: true,
             scooters: Array.from(availableScootersSet),
@@ -914,43 +898,43 @@ async function checkAvailabilityByPincode(pincode) {
 
 async function getScooterInfo(modelName) {
     try {
-        // Improved query to handle "Brand Model" or just "Model"
-        const queryParts = modelName.split(" ");
-        let query;
-        if (queryParts.length > 1) {
-            const brandPart = queryParts[0];
-            const modelPart = queryParts.slice(1).join(" ");
-            query = {
-                $or: [
-                    { model: { $regex: new RegExp(`^${modelName}$`, 'i') } }, // Exact full name match
-                    { brand: { $regex: new RegExp(`^${brandPart}$`, 'i') }, model: { $regex: new RegExp(`^${modelPart}$`, 'i') } }
-                ]
-            };
-        } else {
-            query = { model: { $regex: new RegExp(`^${modelName}$`, 'i') } };
-        }
-
-        const scooter = await Scooter.findOne(query);
+        const scooter = await Scooter.findOne({
+            $or: [
+                { model: { $regex: new RegExp(`^${modelName}$`, 'i') } },
+                { brand: { $regex: new RegExp(modelName.split(" ")[0], 'i') }, model: { $regex: new RegExp(modelName.split(" ").slice(1).join(" "), 'i') } }
+            ]
+        });
 
         if (!scooter) {
-            // Simpler regex for "contains" for similar scooters
             const similarScooters = await Scooter.find({
-                 $or: [
+                $or: [
                     { model: { $regex: modelName, $options: 'i' } },
                     { brand: { $regex: modelName, $options: 'i' } }
                 ]
-            }).limit(3); // Suggest up to 3 similar
+            }).limit(1);
 
             if (similarScooters.length === 0) {
-                return { found: false, message: `Sorry, I couldn't find specific information for an EV scooter named "${modelName}". You can ask me to list available models or check your spelling.` };
+                return { found: false, message: `Sorry, I couldn't find specific information for an EV scooter named "${modelName}". You can ask me to list available models.` };
             }
+            const aSimilarScooter = similarScooters[0];
+            let suggestionMessage = `I couldn't find an exact match for "${modelName}". Did you perhaps mean "${aSimilarScooter.brand} ${aSimilarScooter.model}"? \n\nIf so, here's some information:\n\n`;
 
-            let suggestionMessage = `I couldn't find an exact match for "${modelName}". Did you perhaps mean one of these?\n\n`;
-            similarScooters.forEach(s => {
-                suggestionMessage += `- ${s.brand} ${s.model}\n`;
-            });
-            suggestionMessage += `\nIf so, please ask again with the full name.`;
-            return { found: false, message: suggestionMessage }; // Changed to found: false as it's a suggestion
+            let responseText = `*${aSimilarScooter.brand} ${aSimilarScooter.model}*\n\n`;
+            responseText += `*Price (Ex-showroom):* ₹${aSimilarScooter.price.base.toLocaleString('en-IN')}\n`;
+            responseText += `*Price (On-Road, approx.):* ₹${aSimilarScooter.price.onRoad.toLocaleString('en-IN')}\n`;
+            responseText += `*Range (claimed):* ${aSimilarScooter.range} km\n`;
+            responseText += `*Battery Capacity:* ${aSimilarScooter.batteryCapacity} kWh\n`;
+            responseText += `*Charging Time:* ${aSimilarScooter.chargingTime} hours\n`;
+            responseText += `*Top Speed:* ${aSimilarScooter.topSpeed} km/h\n`;
+            if (aSimilarScooter.colors && aSimilarScooter.colors.length > 0) responseText += `*Available Colors:* ${aSimilarScooter.colors.join(', ')}\n`;
+            if (aSimilarScooter.features && aSimilarScooter.features.length > 0) {
+                responseText += `\n*Key Features:*\n`;
+                aSimilarScooter.features.forEach(feature => { responseText += `- ${feature}\n`; });
+            }
+            if (aSimilarScooter.description) responseText += `\n*Description:* ${aSimilarScooter.description}\n`;
+            responseText += `\nWould you like to check its availability? Just send your 6-digit pincode.`;
+
+            return { found: true, message: suggestionMessage + responseText, scooter: aSimilarScooter };
         }
 
         let responseText = `*${scooter.brand} ${scooter.model}*\n\n`;
@@ -966,7 +950,6 @@ async function getScooterInfo(modelName) {
             scooter.features.forEach(feature => { responseText += `- ${feature}\n`; });
         }
         if (scooter.description) responseText += `\n*Description:* ${scooter.description}\n`;
-        if (scooter.imageUrl) responseText += `\n[View Image](${scooter.imageUrl})\n`; // Added image if available
         responseText += `\nWould you like to check its availability? Just send your 6-digit pincode.`;
 
         return { found: true, message: responseText, scooter: scooter };
@@ -984,27 +967,24 @@ async function getComparisonInfo(modelName1, modelName2) {
         ]);
 
         if (!scooter1Result.found && !scooter2Result.found) return `I couldn't find information for either "${modelName1}" or "${modelName2}". Please check the spellings or try different models.`;
-        if (!scooter1Result.found) return `${scooter1Result.message}\n\nI can tell you about "${modelName2}" if you'd like.`; // Use the suggestion message if model1 not found
-        if (!scooter2Result.found) return `${scooter2Result.message}\n\nI can tell you about "${modelName1}" if you'd like.`; // Use the suggestion message if model2 not found
+        if (!scooter1Result.found) return `I couldn't find information for "${modelName1}". I can tell you about "${modelName2}" if you'd like, or you can try checking the spelling for the first model.`;
+        if (!scooter2Result.found) return `I couldn't find information for "${modelName2}". I can tell you about "${modelName1}" if you'd like, or you can try checking the spelling for the second model.`;
 
         const s1 = scooter1Result.scooter;
         const s2 = scooter2Result.scooter;
 
-        // Ensure consistent padding
-        const maxModelNameLength = Math.max(s1.model.length, s2.model.length, 10); // Min length for header
-
         let comparisonText = `*Comparison: ${s1.brand} ${s1.model} vs ${s2.brand} ${s2.model}*\n\n`;
-        comparisonText += `| Metric                 | ${s1.model.padEnd(maxModelNameLength)} | ${s2.model.padEnd(maxModelNameLength)} |\n`;
-        comparisonText += `|------------------------|${'-'.repeat(maxModelNameLength + 2)}|${'-'.repeat(maxModelNameLength + 2)}|\n`; // Dynamic dash length
-        comparisonText += `| Brand                  | ${s1.brand.padEnd(maxModelNameLength)} | ${s2.brand.padEnd(maxModelNameLength)} |\n`;
-        comparisonText += `| Ex-Showroom Price      | ₹${s1.price.base.toLocaleString('en-IN').padEnd(maxModelNameLength -1)} | ₹${s2.price.base.toLocaleString('en-IN').padEnd(maxModelNameLength-1)} |\n`;
-        comparisonText += `| On-Road Price (approx) | ₹${s1.price.onRoad.toLocaleString('en-IN').padEnd(maxModelNameLength-1)} | ₹${s2.price.onRoad.toLocaleString('en-IN').padEnd(maxModelNameLength-1)} |\n`;
-        comparisonText += `| Range (claimed)        | ${`${s1.range} km`.padEnd(maxModelNameLength)} | ${`${s2.range} km`.padEnd(maxModelNameLength)} |\n`;
-        comparisonText += `| Battery Capacity       | ${`${s1.batteryCapacity} kWh`.padEnd(maxModelNameLength)} | ${`${s2.batteryCapacity} kWh`.padEnd(maxModelNameLength)} |\n`;
-        comparisonText += `| Charging Time          | ${`${s1.chargingTime} hrs`.padEnd(maxModelNameLength)} | ${`${s2.chargingTime} hrs`.padEnd(maxModelNameLength)} |\n`;
-        comparisonText += `| Top Speed              | ${`${s1.topSpeed} km/h`.padEnd(maxModelNameLength)} | ${`${s2.topSpeed} km/h`.padEnd(maxModelNameLength)} |\n`;
-        comparisonText += `\n*Features for ${s1.brand} ${s1.model}:*\n- ${s1.features && s1.features.length > 0 ? s1.features.join('\n- ') : 'Not listed'}\n`;
-        comparisonText += `\n*Features for ${s2.brand} ${s2.model}:*\n- ${s2.features && s2.features.length > 0 ? s2.features.join('\n- ') : 'Not listed'}\n`;
+        comparisonText += `| Metric                 | ${s1.model.padEnd(20)} | ${s2.model.padEnd(20)} |\n`;
+        comparisonText += `|------------------------|-----------------------|-----------------------|\n`;
+        comparisonText += `| Brand                  | ${s1.brand.padEnd(20)} | ${s2.brand.padEnd(20)} |\n`;
+        comparisonText += `| Ex-Showroom Price      | ₹${s1.price.base.toLocaleString('en-IN').padEnd(18)} | ₹${s2.price.base.toLocaleString('en-IN').padEnd(18)} |\n`;
+        comparisonText += `| On-Road Price (approx) | ₹${s1.price.onRoad.toLocaleString('en-IN').padEnd(18)} | ₹${s2.price.onRoad.toLocaleString('en-IN').padEnd(18)} |\n`;
+        comparisonText += `| Range (claimed)        | ${`${s1.range} km`.padEnd(20)} | ${`${s2.range} km`.padEnd(20)} |\n`;
+        comparisonText += `| Battery Capacity       | ${`${s1.batteryCapacity} kWh`.padEnd(20)} | ${`${s2.batteryCapacity} kWh`.padEnd(20)} |\n`;
+        comparisonText += `| Charging Time          | ${`${s1.chargingTime} hrs`.padEnd(20)} | ${`${s2.chargingTime} hrs`.padEnd(20)} |\n`;
+        comparisonText += `| Top Speed              | ${`${s1.topSpeed} km/h`.padEnd(20)} | ${`${s2.topSpeed} km/h`.padEnd(20)} |\n`;
+        comparisonText += `\n*Features for ${s1.model}:*\n- ${s1.features.join('\n- ') || 'Not listed'}\n`;
+        comparisonText += `\n*Features for ${s2.model}:*\n- ${s2.features.join('\n- ') || 'Not listed'}\n`;
         comparisonText += `\nWould you like to check availability for either of these in your area? Send your 6-digit pincode.`;
         return comparisonText;
     } catch (error) {
@@ -1021,37 +1001,17 @@ function extractPincode(message) {
 
 async function extractPotentialModels(message) {
     try {
-        // More targeted extraction: look for "model name" or "brand model name"
         const allScooters = await Scooter.find({}, 'model brand').lean();
-        const modelsFound = new Set();
+        const models = [];
         const lowerMessage = message.toLowerCase();
 
         for (const scooter of allScooters) {
-            const modelLower = scooter.model.toLowerCase();
-            const brandLower = scooter.brand.toLowerCase();
-            // Check for "brand model"
-            if (lowerMessage.includes(`${brandLower} ${modelLower}`)) {
-                modelsFound.add(scooter.model); // Add original case model name
-            }
-            // Check for just "model" (can be ambiguous, but useful)
-            else if (lowerMessage.includes(modelLower)) {
-                 // Avoid adding if "brand model" was already found to reduce redundancy
-                if (!modelsFound.has(scooter.model) && !lowerMessage.includes(`${brandLower} ${modelLower}`)) {
-                     // Check if it's a substring of another model (e.g., "S1" vs "S1 Pro") - prefer longer match if context implies
-                    let isSubstring = false;
-                    for (const m of allScooters) {
-                        if (m.model.toLowerCase() !== modelLower && m.model.toLowerCase().includes(modelLower) && lowerMessage.includes(m.model.toLowerCase())) {
-                            isSubstring = true;
-                            break;
-                        }
-                    }
-                    if (!isSubstring) {
-                        modelsFound.add(scooter.model);
-                    }
-                }
+            if (lowerMessage.includes(scooter.model.toLowerCase()) ||
+                (scooter.brand && lowerMessage.includes(scooter.brand.toLowerCase() + " " + scooter.model.toLowerCase()))) {
+                models.push(scooter.model);
             }
         }
-        return [...modelsFound];
+        return [...new Set(models)];
     } catch (dbError) {
         console.error("DB Error in extractPotentialModels:", dbError);
         return [];
@@ -1063,15 +1023,22 @@ async function extractPotentialModels(message) {
 async function seedSampleData() {
     try {
         const scootersCount = await Scooter.countDocuments();
-        let scooterMap = {};
-
         if (scootersCount > 0) {
             console.log('Sample scooter data likely already exists, skipping scooter seed.');
-            const scooterDocsForMap = await Scooter.find({});
-            scooterDocsForMap.forEach(scooter => { scooterMap[scooter.model] = scooter._id; });
+            const dealersCount = await Dealer.countDocuments();
+            if (dealersCount > 0) {
+                console.log('Sample dealer data also exists, skipping all seeding.');
+                return;
+            }
+            console.log('Scooters exist, but dealers are missing. Attempting to seed dealers...');
         } else {
-            console.log('No scooters found. Seeding sample scooter data...');
-            await Scooter.deleteMany({}); // Clear existing before seeding if count is 0
+            console.log('No scooters found. Seeding sample scooter and dealer data...');
+            await Scooter.deleteMany({});
+            await Dealer.deleteMany({});
+        }
+
+
+        if (scootersCount === 0) {
             const scootersData = [
                 { model: 'S1 Pro', brand: 'Ola Electric', price: { base: 129999, onRoad: 145000 }, range: 181, chargingTime: 6.5, topSpeed: 116, batteryCapacity: 4, features: ['Digital Console', 'Reverse Mode', 'Fast Charging', 'Bluetooth', 'GPS', 'Anti-theft alarm', 'Hill Hold'], colors: ['Jet Black', 'Porcelain White', 'Neo Mint', 'Coral Glam', 'Liquid Silver'], imageUrl: 'https://placehold.co/600x400/EBF4FA/CCCCCC?text=Ola+S1+Pro', description: 'The Ola S1 Pro is a flagship electric scooter known for its performance, range, and smart features.' },
                 { model: '450X', brand: 'Ather', price: { base: 138000, onRoad: 160000 }, range: 111, chargingTime: 5.7, topSpeed: 90, batteryCapacity: 3.7, features: ['Touchscreen Dashboard', 'OTA Updates', 'Navigation', 'Riding Modes', 'Reverse Assist', 'Auto Indicator Off'], colors: ['Space Grey', 'Mint Green', 'True Red', 'Cosmic Black'], imageUrl: 'https://placehold.co/600x400/EBF4FA/CCCCCC?text=Ather+450X', description: 'The Ather 450X is a premium smart electric scooter offering a thrilling ride and connected features. Range is certified, real-world may vary.' },
@@ -1079,30 +1046,29 @@ async function seedSampleData() {
                 { model: 'Chetak Premium', brand: 'Bajaj', price: { base: 145000, onRoad: 158000 }, range: 90, chargingTime: 5, topSpeed: 63, batteryCapacity: 2.88, features: ['Metal Body', 'Keyless Start', 'IP67 Rating', 'Sequential Blinkers', 'Digital Console'], colors: ['Hazelnut', 'Brooklyn Black', 'Velluto Rosso', 'Indigo Metallic'], imageUrl: 'https://placehold.co/600x400/EBF4FA/CCCCCC?text=Bajaj+Chetak', description: 'The Bajaj Chetak electric revives a classic name with modern electric technology and premium build quality.' },
                 { model: 'Vida V1 Pro', brand: 'Hero', price: { base: 125000, onRoad: 140000 }, range: 110, chargingTime: 5.9, topSpeed: 80, batteryCapacity: 3.94, features: ['Removable Batteries', 'Cruise Control', 'SOS Alert', 'Follow-me-home lights', 'Two-way throttle'], colors: ['Matte White', 'Matte Sports Red', 'Matte Abrax Orange'], imageUrl: 'https://placehold.co/600x400/EBF4FA/CCCCCC?text=Hero+Vida+V1', description: 'The Hero Vida V1 Pro offers innovative features like removable batteries and a customizable riding experience.' }
             ];
-            const insertedScooters = await Scooter.insertMany(scootersData);
-            insertedScooters.forEach(scooter => { scooterMap[scooter.model] = scooter._id; });
+            await Scooter.insertMany(scootersData);
             console.log('Sample scooter data seeded successfully.');
         }
 
         const dealersCount = await Dealer.countDocuments();
         if (dealersCount === 0) {
-             if (Object.keys(scooterMap).length > 0) { // Ensure scooterMap is populated
-                console.log('No dealers found. Seeding sample dealer data...');
-                await Dealer.deleteMany({}); // Clear existing before seeding if count is 0
+            const scooterDocs = await Scooter.find({});
+            const scooterMap = {};
+            scooterDocs.forEach(scooter => { scooterMap[scooter.model] = scooter._id; });
+
+            if (Object.keys(scooterMap).length > 0) {
                  const dealersData = [
                     { name: 'Ola Experience Centre - Mumbai', address: '123 Andheri West', pincode: '400058', city: 'Mumbai', state: 'Maharashtra', contact: '+91 9000000001', email: 'mumbai.ec@olaelectric.com', availableModels: scooterMap['S1 Pro'] ? [scooterMap['S1 Pro']] : [], operatingHours: '10:00 AM - 8:00 PM', coordinates: { latitude: 19.1196, longitude: 72.8465 } },
                     { name: 'Ather Space - Delhi', address: '456 Connaught Place', pincode: '110001', city: 'New Delhi', state: 'Delhi', contact: '+91 9000000002', email: 'delhi.as@atherenergy.com', availableModels: scooterMap['450X'] ? [scooterMap['450X']] : [], operatingHours: '10:00 AM - 7:00 PM', coordinates: { latitude: 28.6329, longitude: 77.2195 } },
                     { name: 'TVS Green Motors - Bangalore', address: '789 Koramangala', pincode: '560034', city: 'Bangalore', state: 'Karnataka', contact: '+91 9000000003', email: 'bangalore.tvs@greenmotors.com', availableModels: scooterMap['iQube S'] ? [scooterMap['iQube S']] : [], operatingHours: '9:30 AM - 7:30 PM', coordinates: { latitude: 12.9351, longitude: 77.6245 } },
                     { name: 'Bajaj EV World - Pune', address: 'Plot 10, FC Road', pincode: '411004', city: 'Pune', state: 'Maharashtra', contact: '+91 9000000004', email: 'pune.bajaj@evworld.com', availableModels: scooterMap['Chetak Premium'] ? [scooterMap['Chetak Premium']] : [], operatingHours: '10:00 AM - 8:00 PM', coordinates: { latitude: 18.5204, longitude: 73.8567 } },
-                    { name: 'Hero Vida Hub - South Mumbai', address: '234 Marine Drive', pincode: '400002', city: 'Mumbai', state: 'Maharashtra', contact: '+91 9000000005', email: 'mumbai.vida@heromotocorp.com', availableModels: [scooterMap['Vida V1 Pro'], scooterMap['S1 Pro']].filter(id => !!id), operatingHours: '11:00 AM - 7:00 PM', coordinates: { latitude: 18.9442, longitude: 72.8237 } }
+                    { name: 'Hero Vida Hub - South Mumbai', address: '234 Marine Drive', pincode: '400002', city: 'Mumbai', state: 'Maharashtra', contact: '+91 9000000005', email: 'mumbai.vida@heromotocorp.com', availableModels: [scooterMap['Vida V1 Pro'], scooterMap['S1 Pro']].filter(id => id), operatingHours: '11:00 AM - 7:00 PM', coordinates: { latitude: 18.9442, longitude: 72.8237 } }
                 ];
                 await Dealer.insertMany(dealersData);
                 console.log('Sample dealer data seeded successfully.');
             } else {
-                console.log('Cannot seed dealers as scooterMap is empty. Ensure scooters were seeded or exist.');
+                console.log('Cannot seed dealers as no scooter data found to link or scooterMap is empty.');
             }
-        } else {
-            console.log('Sample dealer data likely already exists, skipping dealer seed.');
         }
     } catch (error) {
         console.error('Error seeding data:', error);
@@ -1125,37 +1091,25 @@ async function initializeBotApplication(currentApp) {
     }
 
     try {
-        console.log('Attempting to connect to MongoDB with URI:', MONGODB_URI.substring(0, MONGODB_URI.indexOf('@')) + '...@' + MONGODB_URI.substring(MONGODB_URI.lastIndexOf('/'))); // Log URI safely
+        console.log('Attempting to connect to MongoDB...');
         await mongoose.connect(MONGODB_URI, mongooseOptions);
-        // If connection is successful, the 'connected' event listener will log it.
 
         bot = new Telegraf(TELEGRAM_BOT_TOKEN);
         console.log("Telegraf bot instance created.");
 
+        // ***** ADDED/ENHANCED: Global Error Handler for Telegraf *****
         bot.catch((err, ctx) => {
-            console.error(`Telegraf Error for ${ctx.updateType} from user ${ctx.from?.id} in chat ${ctx.chat?.id}:`, err);
-            const errorMessage = err.message || 'Unknown error';
-            if (ctx && typeof ctx.reply === 'function') {
-                ctx.reply(`Sorry, an unexpected error occurred on my end. The technical team has been notified. (Error: ${errorMessage.substring(0,100)})`) // Send limited error info
-                   .catch(replyError => console.error('Failed to send error reply to user:', replyError));
-            } else {
-                console.error('Context or reply function unavailable for error reporting to user.');
-            }
+            console.error(`Telegraf Error for ${ctx.updateType} from user ${ctx.from?.id}:`, err);
+            // Attempt to inform the user, but catch potential errors if sending fails
+            ctx.reply('Sorry, an unexpected error occurred. Please try again later.')
+               .catch(replyError => console.error('Failed to send error reply to user:', replyError));
         });
         console.log("Global Telegraf error handler (bot.catch) attached.");
+        // ***** END OF ADDED/ENHANCED *****
 
-        // Session middleware (consider if truly needed for a stateless Vercel setup, as sessions might not persist across invocations easily unless DB backed)
-        currentApp.use(session({ // Use currentApp to attach session middleware if needed globally for Express
-            store: { collection: mongoose.connection.collection('sessions') }, // Mongoose store for sessions
-            secret: process.env.SESSION_SECRET || 'your-super-secret-key-for-session', // Add a SESSION_SECRET to env
-            resave: false,
-            saveUninitialized: false,
-            cookie: { secure: process.env.NODE_ENV === 'production' } // Use secure cookies in production
+        bot.use(session({
+            store: { collection: mongoose.connection.collection('sessions') },
         }));
-        // OR if Telegraf session is enough:
-        // bot.use(session({
-        //     store: { collection: mongoose.connection.collection('sessions') },
-        // }));
         console.log('Mongoose session middleware for bot initialized successfully.');
 
         // --- Bot Commands and Handlers ---
@@ -1175,11 +1129,12 @@ How can I assist you today?`;
                 await ctx.reply(welcomeMessage, Markup.keyboard([
                     ['Compare Scooters', 'Find Scooters by Pincode'],
                     ['/help']
-                ]).resize().oneTime()); // oneTime might not be ideal if users revisit often
+                ]).resize().oneTime());
                 await saveConversation(ctx, '/start', welcomeMessage);
-            } catch (e) { // Error will be caught by bot.catch, but local log is good.
+            } catch (e) {
                 console.error("Error in /start handler:", e);
-                // No need to reply here, bot.catch will handle it.
+                // bot.catch will also log this, but specific logging here can be useful
+                await ctx.reply("Sorry, there was an issue starting our conversation. Please try again.").catch(err => console.error("Failed to send error reply in /start:", err));
             }
         });
 
@@ -1213,6 +1168,7 @@ Just type your question! If I can't find specific data, I'll try to answer with 
                 await saveConversation(ctx, '/help', helpMessage);
             } catch (e) {
                 console.error("Error in /help handler:", e);
+                await ctx.reply("Sorry, couldn't fetch help information right now.").catch(err => console.error("Failed to send error reply in /help:", err));
             }
         });
 
@@ -1230,7 +1186,7 @@ Just type your question! If I can't find specific data, I'll try to answer with 
                     await saveConversation(ctx, '/getinteractions', "No history found.");
                     return;
                 }
-                const recentInteractions = record.conversations; // Already sliced on save
+                const recentInteractions = record.conversations.slice(-10);
                 let responseText = `*Your Recent Interactions (Last ${recentInteractions.length}):*\n\n`;
                 if (record.userDetails) {
                     responseText += `**User Details:**\n`;
@@ -1241,17 +1197,15 @@ Just type your question! If I can't find specific data, I'll try to answer with 
                 }
                 recentInteractions.forEach((interaction, index) => {
                     responseText += `**Interaction ${index + 1} (${new Date(interaction.timestamp).toLocaleString()}):**\n`;
-                    responseText += `- User: \`${interaction.userMessage.substring(0, 100)}\`\n`; // Limit length
-                    responseText += `- Bot: \`${interaction.botMessage.substring(0,100)}\`\n\n`; // Limit length
+                    responseText += `- User: ${interaction.userMessage}\n`;
+                    responseText += `- Bot: ${interaction.botMessage}\n\n`;
                 });
-                if (responseText.length > 4096) { // Telegram message limit
-                    responseText = responseText.substring(0, 4090) + "\n... (truncated)";
-                }
                 await ctx.replyWithMarkdown(responseText);
                 await saveConversation(ctx, '/getinteractions', "Displayed interaction history.");
             } catch (error) {
                 console.error('Error fetching interactions:', error);
-                // bot.catch will handle reply
+                await ctx.reply("Sorry, I encountered an error while fetching your interaction history.").catch(err => console.error("Failed to send error reply in /getinteractions:", err));
+                await saveConversation(ctx, '/getinteractions', "Error fetching history.");
             }
         });
 
@@ -1260,98 +1214,103 @@ Just type your question! If I can't find specific data, I'll try to answer with 
             const userMessage = ctx.message.text.trim();
             let botResponse = "I'm sorry, I'm having a little trouble understanding that right now. Could you try rephrasing?";
 
-            // It's good practice to wrap the entire handler in try-catch if bot.catch isn't sufficient
-            // However, with bot.catch, individual try-catches are for more specific error handling or logging.
-            // Throwing error from here will be caught by bot.catch.
+            try {
+                await ctx.telegram.sendChatAction(ctx.chat.id, 'typing');
 
-            await ctx.telegram.sendChatAction(ctx.chat.id, 'typing');
+                const pincode = extractPincode(userMessage);
+                const comparisonRegex = /compare ([\w\s.-]+) and ([\w\s.-]+)/i;
+                const comparisonMatch = userMessage.match(comparisonRegex);
 
-            const pincode = extractPincode(userMessage);
-            const comparisonRegex = /compare ([\w\sÀ-ÖØ-öø-ÿ.-]+) and ([\w\sÀ-ÖØ-öø-ÿ.-]+)/i; // Broader char support for model names
-            const comparisonMatch = userMessage.match(comparisonRegex);
-
-            if (pincode) {
-                const availabilityResult = await checkAvailabilityByPincode(pincode);
-                botResponse = availabilityResult.message; // Initial message
-                if (availabilityResult.available && availabilityResult.dealers && availabilityResult.dealers.length > 0) {
-                    botResponse += `\n\n*Dealer(s) Found:*\n`;
-                    availabilityResult.dealers.forEach((dealer, index) => {
-                        botResponse += `\n*${index + 1}. ${dealer.name.trim()}*\n`;
-                        botResponse += `   Address: ${dealer.address.trim()}\n`;
-                        botResponse += `   Contact: ${dealer.contact ? dealer.contact.trim() : 'N/A'}\n`;
-                        botResponse += `   Models (reported): ${dealer.models ? dealer.models.trim() : 'N/A'}\n`;
-                    });
-                    botResponse += "\n\nWould you like specific information about any of these scooters or brands?";
-                }
-            } else if (comparisonMatch) {
-                const model1 = comparisonMatch[1].trim();
-                const model2 = comparisonMatch[2].trim();
-                botResponse = await getComparisonInfo(model1, model2);
-            } else {
-                const potentialModels = await extractPotentialModels(userMessage);
-                if (potentialModels.length === 1) {
-                    const scooterInfo = await getScooterInfo(potentialModels[0]);
-                    botResponse = scooterInfo.message;
-                } else if (potentialModels.length > 1 && OPENAI_API_KEY) { // Only query GPT if multiple models and key exists
-                     const conversationHistory = await getConversationHistory(userId);
-                     botResponse = await queryChatGPT(`User is asking about "${userMessage}". Models identified: ${potentialModels.join(', ')}. Clarify or provide info.`, conversationHistory);
-                }
-                else if (OPENAI_API_KEY) { // No specific models extracted, use general ChatGPT
-                    const conversationHistory = await getConversationHistory(userId);
-                    botResponse = await queryChatGPT(userMessage, conversationHistory);
+                if (pincode) {
+                    const availabilityResult = await checkAvailabilityByPincode(pincode);
+                    botResponse = availabilityResult.message;
+                    if (availabilityResult.available && availabilityResult.dealers) {
+                        botResponse += `\n\n*Dealer(s) Found:*\n`;
+                        availabilityResult.dealers.forEach((dealer, index) => {
+                            botResponse += `\n*${index + 1}. ${dealer.name}*\n`;
+                            botResponse += `   Address: ${dealer.address}\n`;
+                            botResponse += `   Contact: ${dealer.contact || 'N/A'}\n`;
+                            botResponse += `   Models (reported): ${dealer.models || 'N/A'}\n`;
+                        });
+                        botResponse += "\n\nWould you like specific information about any of these scooters or brands?";
+                    }
+                } else if (comparisonMatch) {
+                    const model1 = comparisonMatch[1].trim();
+                    const model2 = comparisonMatch[2].trim();
+                    botResponse = await getComparisonInfo(model1, model2);
                 } else {
-                    botResponse = "I can find scooter info, compare models, or check availability by pincode. How can I help?";
+                    const potentialModels = await extractPotentialModels(userMessage);
+                    if (potentialModels.length === 1) {
+                        const scooterInfo = await getScooterInfo(potentialModels[0]);
+                        botResponse = scooterInfo.message;
+                    } else {
+                        const conversationHistory = await getConversationHistory(userId);
+                        botResponse = await queryChatGPT(userMessage, conversationHistory);
+                    }
                 }
+                await ctx.replyWithMarkdown(botResponse);
+                await saveConversation(ctx, userMessage, botResponse);
+            } catch (error) {
+                // Specific error handling for the text handler
+                console.error(`Error processing text message: "${userMessage}" from user ${userId}:`, error);
+                // The global bot.catch will also pick this up if it's not caught and re-thrown,
+                // but having local catch can allow for more specific responses if needed.
+                // Here, we'll let bot.catch handle the user-facing reply.
+                // If you want a different message here, you can set it.
+                // For now, we ensure it's logged and rely on bot.catch for user reply.
+                // Throw error to be caught by global handler, or handle reply directly:
+                // await ctx.reply("Custom error message for text processing failure.").catch(e => console.error("Failed to send custom error reply:", e));
+                // await saveConversation(ctx, userMessage, "Error response: Bot encountered an internal error during text processing.");
+
+                // Rethrow to be caught by the global `bot.catch` which will send a generic error message
+                throw error;
             }
-            await ctx.replyWithMarkdown(botResponse, { parse_mode: 'Markdown' }); // Explicitly set parse_mode
-            await saveConversation(ctx, userMessage, botResponse);
         });
         console.log("Bot command and text handlers attached.");
         // --- End of Bot Commands and Handlers ---
 
-        if (process.env.NODE_ENV !== 'test') { // Avoid seeding in test environments
+        if (process.env.NODE_ENV !== 'test') {
             await seedSampleData();
         }
 
-        const webhookPath = `/api/telegram-webhook`; // Ensure this is unique and not conflicting
+        const webhookPath = `/api/telegram-webhook`;
         console.log(`Intended webhook path: ${webhookPath}`);
 
         if (process.env.NODE_ENV === 'production' && VERCEL_URL) {
             const webhookUrl = `${VERCEL_URL.replace(/\/$/, '')}${webhookPath}`;
             console.log(`Attempting to set webhook to: ${webhookUrl}`);
             try {
-                // Check current webhook before setting
                 const currentWebhook = await bot.telegram.getWebhookInfo();
                 if (currentWebhook.url !== webhookUrl) {
-                    const setResult = await bot.telegram.setWebhook(webhookUrl, {
-                        // drop_pending_updates: true // Optional: drop old updates when setting new webhook
-                    });
+                    const setResult = await bot.telegram.setWebhook(webhookUrl);
                     console.log(`Webhook successfully set to ${webhookUrl}. Result: ${setResult}`);
                 } else {
-                     console.log(`Webhook already correctly set to ${webhookUrl}. No action needed.`);
+                    console.log(`Webhook already set to ${webhookUrl}. No action needed.`);
                 }
             } catch (e) {
-                console.error(`CRITICAL_WEBHOOK_ERROR: Failed to set webhook: ${e.message}. Check token, permissions, and Vercel logs. Bot might not receive updates.`, e);
-                // This is a critical error. The bot will not function.
+                console.error(`CRITICAL_WEBHOOK_ERROR: Failed to set webhook: ${e.message}. Check token, permissions, and Vercel logs.`, e);
+                // Bot may not function correctly if webhook isn't set.
             }
         } else {
-            console.log('Webhook setup skipped (not in production with VERCEL_URL, or VERCEL_URL not set).');
+            console.log('Webhook setup skipped (not in production with VERCEL_URL, or running locally).');
             if (process.env.NODE_ENV === 'production' && !VERCEL_URL) {
-                console.warn("VERCEL_URL environment variable is not set. Webhook cannot be configured automatically on Vercel. Bot will likely not work.");
+                console.warn("VERCEL_URL environment variable is not set. Webhook cannot be configured automatically on Vercel.");
             }
-             // For local development, you'd typically use polling or a tunnel like ngrok + manual webhook set.
-            // Do NOT use bot.launch() for polling in a Vercel serverless environment.
+            if (process.env.NODE_ENV !== 'production' && bot.launch && typeof bot.launch === 'function') {
+                 console.log("Local development: To run with polling, ensure you have `nodemon` and uncomment `bot.launch()` if needed.");
+                 // Example for local polling (if you prefer it over manual webhook setup with ngrok for local dev)
+                 // try {
+                 //     await bot.telegram.deleteWebhook(); // Remove any existing webhook for polling
+                 //     console.log("Starting bot with polling for local development...");
+                 //     await bot.launch();
+                 //     console.log("Bot launched with polling.");
+                 // } catch (pollingError) {
+                 //    console.error("Error starting bot with polling:", pollingError);
+                 // }
+            }
         }
 
-        // Register webhook handler with Express. This *must* be after bot initialization.
-        currentApp.post(webhookPath, (req, res) => { // Vercel typically uses POST for webhooks
-            console.log(`Webhook request received at ${webhookPath} from IP: ${req.ip}`);
-            return bot.handleUpdate(req.body, res);
-        });
-        // Also allow GET for simple checks or if Telegram ever uses it for verification
-        currentApp.get(webhookPath, (req, res) => {
-            res.status(200).send("Telegram webhook endpoint is active (GET). Use POST for updates.");
-        });
+        currentApp.use(webhookPath, bot.webhookCallback(webhookPath));
         console.log(`Bot webhook callback registered for POST requests at ${webhookPath} on the main app.`);
 
         console.log('Bot application initialization complete.');
@@ -1361,63 +1320,36 @@ Just type your question! If I can't find specific data, I'll try to answer with 
         if (error.stack) console.error(error.stack);
         // This error will prevent the bot from starting correctly.
         // The /api/health endpoint might still work if the error is after its definition.
-        throw error; // Rethrow to be caught by the final catch block in the main execution flow
+        throw error; // Rethrow to be caught by the final catch block
     }
 }
 
 // Call the asynchronous initialization function, passing the Express app
 initializeBotApplication(app).then(() => {
     console.log("Asynchronous bot initializers completed successfully.");
-    // The server is already implicitly started by Vercel when 'module.exports = app' is handled.
-    // No app.listen() needed for Vercel.
 }).catch(err => {
-    console.error("FATAL: Asynchronous bot initializers failed:", err.message, err.stack ? err.stack : '');
-    // Server might still run with basic routes (/ and /api/health), but bot functionality will likely be broken.
+    console.error("FATAL: Asynchronous bot initializers failed.", err.message);
+    // Server might still run with basic routes, but bot functionality will likely be broken.
+    // The /api/health endpoint can help diagnose if the Express app itself started.
 });
 
-// SIGINT handler for graceful shutdown (more relevant for local dev/containerized envs than Vercel serverless)
+// SIGINT handler for graceful shutdown
 process.on('SIGINT', async () => {
     console.log('SIGINT received. Shutting down...');
     if (bot && typeof bot.stop === 'function') {
-        try {
-            bot.stop('SIGINT'); // Telegraf's stop might not be very effective in serverless.
-            console.log('Bot stop signal sent.');
-        } catch (stopErr) {
-            console.error("Error stopping Telegraf bot:", stopErr);
-        }
+        bot.stop('SIGINT');
+        console.log('Bot stop signal sent.');
     }
     if (mongoose.connection.readyState === 1) { // 1 means connected
         try {
-            await mongoose.connection.close(false); // false = don't force close, allow graceful
+            await mongoose.connection.close();
             console.log('Mongoose connection closed.');
         } catch (mongoCloseError) {
             console.error('Error closing Mongoose connection:', mongoCloseError);
         }
     }
-    process.exit(0); // Exit gracefully
-});
-
-process.on('SIGTERM', async () => { // Vercel might send SIGTERM
-    console.log('SIGTERM received. Shutting down...');
-     if (bot && typeof bot.stop === 'function') {
-        try {
-            bot.stop('SIGTERM');
-            console.log('Bot stop signal sent (SIGTERM).');
-        } catch (stopErr) {
-            console.error("Error stopping Telegraf bot (SIGTERM):", stopErr);
-        }
-    }
-    if (mongoose.connection.readyState === 1) {
-        try {
-            await mongoose.connection.close(false);
-            console.log('Mongoose connection closed (SIGTERM).');
-        } catch (mongoCloseError) {
-            console.error('Error closing Mongoose connection (SIGTERM):', mongoCloseError);
-        }
-    }
     process.exit(0);
 });
-
 
 // Export the Express app instance for Vercel
 module.exports = app;
