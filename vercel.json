@@ -6,11 +6,7 @@
   "routes": [
     { "src": "/(.*)", "dest": "index.js", "methods": ["GET", "POST", "OPTIONS"] }
   ],
-  "env": { "NODE_ENV": "production" },
-  "functions": {
-    "index.js": {
-      "memory": 1024,
-      "maxDuration": 10
-    }
+  "env": {
+    "NODE_ENV": "production"
   }
 }
